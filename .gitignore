@@ -7,3 +7,8 @@ __pycache__/
 # aid-cache.py writes these next to the script. They store latitude,
 # longitude, and height. A cache passed with -f needs its own line here.
 *-cache.json
+
+# chrony-temp.py writes these in the working directory.
+chrony-temp-samples.csv
+*-samples.csv
+chrony-tempcomp-*.points

@@ -91,6 +91,55 @@ Samples from an earlier `offset` setting in the same log are dropped when cooked
 
 A shorter window still prints a preview. Status stays `preliminary` until the sample and span minimums are met.
 
+### `chrony-temp.py`
+
+Recommend a chrony `tempcomp` line from the system-clock rate and a temperature sensor. The script prints the line and writes a points file in the working directory. It does not edit `chrony.conf`.
+
+Chrony accepts two forms. The quadratic line is:
+
+```
+tempcomp <sensor> <interval> <T0> <k0> <k1> <k2>
+```
+
+`comp = k0 + (T - T0) * k1 + (T - T0)^2 * k2`, with `T` in the units of the sensor file. Linux sysfs temperatures are millidegrees Celsius. Positive `comp` speeds the clock up. Chrony ignores a reading outside ±10 ppm, so the fit removes the average clock rate and keeps only the temperature shape. The average rate stays in chrony's own frequency tracking.
+
+The points file is the same curve sampled every 0.25 °C, with a bin median used where a temperature step has enough samples. Chrony interpolates that file. The file is numbers only.
+
+```bash
+./chrony-temp.py --sensors
+./chrony-temp.py --collect 7200 --sensor /sys/class/thermal/thermal_zone0/temp
+./chrony-temp.py
+```
+
+`--sensors` reads `/sys/class/thermal` and `/sys/class/hwmon` and marks board and CPU-package sensors as the ones to try first. Wifi, disk, and battery sensors are listed as distant from the oscillator.
+
+`--collect` is the first insertion, before `tempcomp.log` exists. It samples the chosen sensor and `chronyc tracking` for the given number of seconds and appends `chrony-temp-samples.csv`. If a `tempcomp` line is already active, each sample subtracts the compensation chrony is applying so the fit is not stacked on top of it. The temperature has to move during the collection. A machine sitting at one temperature cannot show the curve.
+
+After that line is installed, add `tempcomp` to the log directive and run `./chrony-temp.py` with no `--collect`. The refit then uses `tempcomp.log` paired with `tracking.log`. A temperature reading counts while an NTP server is selected, the tracking offset and frequency skew are inside the limits, and the reading is past the warmup after an unsynchronised sample. Each later run rewrites the points file from those logs.
+
+| Option | Meaning | Default |
+| --- | --- | --- |
+| `--sensors` | List temperature files and which ones are worth trying | off |
+| `--collect` | Sample the sensor and `chronyc tracking` for this many seconds, then fit | off |
+| `--sensor` | Temperature file for `--collect` | required with `--collect` |
+| `--source` | `auto`, `chrony`, or `preliminary` | `auto` |
+| `--samples` | Preliminary CSV path | `./chrony-temp-samples.csv` |
+| `--points` | Points-file path | `./chrony-tempcomp-<sensor>.points` |
+| `--log-dir` | Directory with `tempcomp.log` and `tracking.log` | `/var/log/chrony` |
+| `--chrony-conf` | Read-only source for the active `tempcomp` line | `/etc/chrony/chrony.conf` |
+| `--interval` | Update interval in the suggested line, seconds | the configured interval, else 60 |
+| `--step` | Points-file step, millidegrees | `250` |
+| `--margin` | Degrees to extend the points file past the observed range | `2` |
+| `--include-rotated` | Also read `tempcomp.log.N` and `tracking.log.N` | off |
+| `--min-span` | Seconds required before status is `ok` | `7200` |
+| `--min-samples` | Samples required before status is `ok` | `20` |
+| `--min-temp-span` | Degrees of temperature span required before status is `ok` | `2` |
+| `--strict` | Exit 2 unless status is `ok` | off |
+
+Status stays `preliminary` until the sample, time, and temperature-span bars are all met. A curve that barely moves is `flat`.
+
+`chrony-temp-samples.csv` and `chrony-tempcomp-*.points` are listed in `.gitignore`.
+
 ## Python setup
 
 Python 3.10 or newer. The `float | None` annotation in `chrony-gps.py` needs that version.
@@ -114,7 +163,13 @@ log tracking refclocks
 logdir /var/log/chrony
 ```
 
-The account that runs the script needs read access to those logs, and to `chrony.conf` if you want the suggested `refclock` line. The script has no chrony Python package of its own.
+`chrony-temp.py` also reads `tempcomp.log` once the log line includes `tempcomp`:
+
+```
+log tracking refclocks tempcomp
+```
+
+The account that runs the scripts needs read access to those logs, and to `chrony.conf` if you want the suggested lines. The scripts have no chrony Python package of their own. `chrony-temp.py --collect` also runs `chronyc tracking`.
 
 ## License
 
