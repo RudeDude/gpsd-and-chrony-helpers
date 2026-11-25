@@ -2,6 +2,16 @@
 
 Python tools for sending u-blox aiding data through [gpsd](https://gpsd.io/), and for choosing chrony `offset` and `delay` on USB GPS refclocks.
 
+## Contents
+
+- [aid-ini.py](#aid-inipy)
+- [aid-cache.py](#aid-cachepy)
+- [chrony-gps.py](#chrony-gpspy)
+- [chrony-temp.py](#chrony-temppy)
+- [holdover-estimate.py](#holdover-estimatepy)
+- [Python setup](#python-setup)
+- [License](#license)
+
 ## Utilities
 
 ### `aid-ini.py`
