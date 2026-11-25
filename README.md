@@ -125,14 +125,14 @@ The points file is the same curve sampled every 0.25 °C, with a bin median used
 
 `--collect` is the first insertion, before `tempcomp.log` exists. It samples the chosen sensor and `chronyc tracking` for the given number of seconds and appends `<sensor>-samples.csv` in the working directory. The sensor name is the last two parts of the path, so `/sys/class/thermal/thermal_zone0/temp` writes `thermal_zone0-temp-samples.csv`. Two collections can run at the same time. If a `tempcomp` line is already active, each sample subtracts the compensation chrony is applying so the fit is not stacked on top of it. The temperature has to move during the collection. A machine sitting at one temperature cannot show the curve. When the run finishes, the last lines are the temperature and clock-rate sweep stored in that file, then the `tempcomp` line to consider adding to `chrony.conf`.
 
-After that line is installed, add `tempcomp` to the log directive and run `./chrony-temp.py` with no `--collect`. The refit then uses `tempcomp.log` paired with `tracking.log`. A temperature reading counts while an NTP server is selected, the tracking offset and frequency skew are inside the limits, and the reading is past the warmup after an unsynchronised sample. Each later run rewrites the points file from those logs.
+A run with no flags reads every sensor that has data and prints one section per sensor, then the `tempcomp` lines to consider. Data is `tempcomp.log` and its rotated logs, every `*-samples.csv` in the working directory, and every `*-comp.points` file. Chrony logs do not name a sensor, so they are applied to the sensor on the active `tempcomp` line. A points file with no clock-rate samples still produces a line that uses that file. A temperature reading counts while an NTP server is selected, the tracking offset and frequency skew are inside the limits, and the reading is past the warmup after an unsynchronised sample. Each later run rewrites that sensor's points file from the samples.
 
 | Option | Meaning | Default |
 | --- | --- | --- |
 | `--sensors` | List temperature files and which ones are worth trying | off |
 | `--collect` | Sample the sensor and `chronyc tracking` for this many seconds, then fit | off |
-| `--sensor` | Temperature file for `--collect` | required with `--collect` |
-| `--source` | `auto`, `chrony`, or `preliminary` | `auto` |
+| `--sensor` | Temperature file for `--collect`, or the only sensor to fit | required with `--collect` |
+| `--source` | `auto` reads logs, csv, and points for every sensor; `chrony` or `preliminary` limit the source | `auto` |
 | `--samples` | Preliminary CSV path | `./<sensor>-samples.csv` |
 | `--points` | Points-file path | `./<sensor>-comp.points` |
 | `--log-dir` | Directory with `tempcomp.log` and `tracking.log` | `/var/log/chrony` |
@@ -140,7 +140,7 @@ After that line is installed, add `tempcomp` to the log directive and run `./chr
 | `--interval` | Update interval in the suggested line, seconds | the configured interval, else 60 |
 | `--step` | Points-file step, millidegrees | `250` |
 | `--margin` | Degrees to extend the points file past the observed range | `2` |
-| `--include-rotated` | Also read `tempcomp.log.N` and `tracking.log.N` | off |
+| `--include-rotated` | Read `tempcomp.log.N` and `tracking.log.N` | on |
 | `--min-span` | Seconds required before status is `ok` | `7200` |
 | `--min-samples` | Samples required before status is `ok` | `20` |
 | `--min-temp-span` | Degrees of temperature span required before status is `ok` | `2` |

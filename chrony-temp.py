@@ -7,9 +7,10 @@ Two stages:
   tracking and stores <sensor>-samples.csv in the working directory.
   The sensor name is the last two parts of its path, so two collections
   can run at once. That file is enough to insert a first tempcomp line.
-- After chrony.conf logs tempcomp, the fit uses tempcomp.log and
-  tracking.log. Each later run replaces the suggestion with one computed
-  from those logs.
+- A run with no flags reads every sensor that has data. That is the
+  tempcomp logs, including rotated logs, plus *-samples.csv and
+  *-comp.points files in the working directory. Each sensor gets its
+  own section and its own config line.
 
 The suggested line is the quadratic form:
 
@@ -1138,11 +1139,20 @@ def temp_line(sensor, interval, info):
 
 
 def print_report(context, info, drops, args, directive, points_path, points_meta):
-    print("chrony temperature compensation")
-    print(f"source: {context['source']}")
+    if context.get("count"):
+        print()
+        print(f"sensor {context['index']} of {context['count']}: {context['sensor']}")
+    else:
+        print("chrony temperature compensation")
+        print(f"sensor: {context['sensor']}")
+    print(f"sources: {context['source']}")
     if context.get("files"):
         print("files: " + ", ".join(context["files"]))
-    print(f"sensor: {context['sensor']}")
+    if context.get("points_note"):
+        print(
+            f"points file on disk: {context['points_note']} "
+            "(clock-rate samples are used instead)"
+        )
     if info.get("t_start") is not None:
         print(f"span: {fmt_time(info['t_start'])} .. {fmt_time(info['t_end'])}")
     print(
@@ -1367,34 +1377,6 @@ def _print_next(context, directive):
     print("  log tracking tempcomp")
 
 
-def prepare_chrony(args, directive):
-    temp_paths = log_files(args.log_dir, "tempcomp", args.include_rotated)
-    tr_paths = log_files(args.log_dir, "tracking", args.include_rotated)
-    if not temp_paths:
-        return None, "no tempcomp.log"
-    if not tr_paths:
-        return None, "no tracking.log"
-    temps = load_tempcomp(temp_paths)
-    tracks = load_tracking(tr_paths)
-    paired, gaps = pair_readings(temps, tracks, args.max_gap)
-    kept, drops, _windows = select_readings(paired, gaps, tracks, args)
-    sensor = directive.sensor if directive is not None else args.sensor
-    if sensor is None:
-        return None, "tempcomp.log has temperatures but no sensor path; pass --sensor"
-    context = {
-        "source": "chrony tempcomp.log + tracking.log",
-        "label": "chrony",
-        "files": [path.name for path in temp_paths + tr_paths],
-        "sensor": sensor,
-        "removed": sensor,
-        "temp_n": len(temps),
-        "paired": len(paired),
-        "interval": args.interval or (directive.interval if directive else 60.0),
-        "max_comp": max((abs(reading.comp) for reading in kept), default=0.0),
-    }
-    return (kept, drops, context), None
-
-
 def prepare_preliminary(args, directive):
     if not args.samples.exists():
         return None, f"no preliminary file at {args.samples}"
@@ -1427,7 +1409,7 @@ def prepare_preliminary(args, directive):
     return (kept, drops, context), None
 
 
-def emit(kept, drops, context, args, directive):
+def emit(kept, drops, context, args, directive, advice=None):
     if not kept:
         info = {"status": "short", "n": 0, "outliers": 0}
         print_report(context, info, drops, args, directive, None, (0, 0))
@@ -1447,7 +1429,10 @@ def emit(kept, drops, context, args, directive):
             args.margin,
             args.min_bin,
         )
-        points_path = (args.points or default_points_path(context["sensor"])).resolve()
+        if args.points is not None and context.get("count", 1) == 1:
+            points_path = Path(args.points).resolve()
+        else:
+            points_path = default_points_path(context["sensor"]).resolve()
         try:
             write_points(points_path, points)
         except OSError as exc:
@@ -1457,6 +1442,8 @@ def emit(kept, drops, context, args, directive):
             points_meta = (from_bin, len(points))
             info["point_over"] = sum(1 for _temp, comp in points if abs(comp) > COMP_LIMIT)
     print_report(context, info, drops, args, directive, points_path, points_meta)
+    if advice is not None:
+        advice.extend(conf_lines_from(context, info, points_path))
     if args.strict and info["status"] != "ok":
         return 2
     if info["status"] == "short":
@@ -1464,66 +1451,369 @@ def emit(kept, drops, context, args, directive):
     return 0
 
 
+def conf_lines_from(context, info, points_path):
+    if "k0" not in info or info.get("status") == "short":
+        return []
+    lines = [temp_line(context["sensor"], context["interval"], info)]
+    if points_path is not None:
+        lines.append(
+            f"tempcomp {context['sensor']} "
+            f"{fmt_interval(context['interval'])} {points_path}"
+        )
+    return lines
+
+
+@dataclass
+class SensorData:
+    sensor: str
+    csvs: list
+    points: list
+    use_logs: bool = False
+    bundle: tuple | None = None
+
+
+def interval_for(args, directive, sensor):
+    if args.interval is not None:
+        return args.interval
+    if directive is not None and same_sensor(directive.sensor, sensor):
+        return directive.interval
+    return 60.0
+
+
+def load_chrony(args):
+    temp_paths = log_files(args.log_dir, "tempcomp", args.include_rotated)
+    tr_paths = log_files(args.log_dir, "tracking", args.include_rotated)
+    if not temp_paths:
+        return None, "no tempcomp.log"
+    if not tr_paths:
+        return None, "no tracking.log"
+    temps = load_tempcomp(temp_paths)
+    tracks = load_tracking(tr_paths)
+    paired, gaps = pair_readings(temps, tracks, args.max_gap)
+    files = [path.name for path in temp_paths + tr_paths]
+    return (temps, paired, gaps, tracks, files), None
+
+
+def points_slug(path):
+    name = path.name
+    if name.endswith("-comp.points"):
+        return name[: -len("-comp.points")]
+    prefix = "chrony-tempcomp-"
+    if name.startswith(prefix) and name.endswith(".points"):
+        return name[len(prefix) : -len(".points")]
+    return None
+
+
+def local_points_files(args):
+    found = {}
+    for pattern in ("*-comp.points", "chrony-tempcomp-*.points"):
+        for path in Path.cwd().glob(pattern):
+            if path.is_file():
+                found[path.resolve()] = path
+    if args.points_explicit and args.points.is_file():
+        found[args.points.resolve()] = args.points
+    return sorted(found.values(), key=lambda path: path.name)
+
+
+def local_sample_files(args):
+    if args.source == "chrony":
+        return []
+    if args.samples_explicit:
+        return [args.samples]
+    return sorted(path for path in Path.cwd().glob("*-samples.csv") if path.is_file())
+
+
+def resolve_slug(slug, groups, directive, args, sysfs):
+    candidates = [group.sensor for group in groups]
+    if directive is not None:
+        candidates.append(directive.sensor)
+    if args.sensor:
+        candidates.append(args.sensor)
+    for candidate in candidates:
+        if sensor_slug(candidate) == slug:
+            return candidate
+    for sensor in sysfs:
+        if sensor.reading is None:
+            continue
+        if sensor_slug(sensor.path) == slug:
+            return str(sensor.path)
+    return None
+
+
+def group_for(groups, sensor):
+    for group in groups:
+        if same_sensor(group.sensor, sensor):
+            return group
+    group = SensorData(str(sensor), [], [], False, None)
+    groups.append(group)
+    return group
+
+
+def discover_groups(args, directive):
+    """Sensors that have logs, a csv, or a points file."""
+    groups = []
+    notes = []
+    if args.samples_explicit and not args.samples.exists():
+        sys.exit(f"no preliminary file at {args.samples}")
+    for path in local_sample_files(args):
+        header = samples_header_sensor(path)
+        if not header:
+            notes.append(f"{path.name} has no sensor header")
+            continue
+        if args.sensor and not same_sensor(header, args.sensor):
+            if args.samples_explicit:
+                sys.exit(f"{path} belongs to {header}, not {args.sensor}")
+            continue
+        group_for(groups, header).csvs.append(path)
+
+    logs, log_err = (None, None)
+    if args.source != "preliminary":
+        logs, log_err = load_chrony(args)
+    temps = logs[0] if logs else []
+    if temps:
+        if directive is not None:
+            log_sensor = directive.sensor
+        elif args.sensor:
+            log_sensor = args.sensor
+        else:
+            log_sensor = None
+        if log_sensor is None:
+            notes.append(
+                "tempcomp.log has readings, but no tempcomp line names their sensor. "
+                "Pass --sensor to use them."
+            )
+        elif args.sensor is None or same_sensor(args.sensor, log_sensor):
+            group = group_for(groups, log_sensor)
+            group.use_logs = True
+            group.bundle = logs
+        else:
+            notes.append(f"tempcomp.log follows {log_sensor}, not {args.sensor}")
+    elif args.source == "chrony":
+        notes.append(log_err or "tempcomp log has no temperature rows")
+
+    if args.source == "auto":
+        sysfs = None
+        for path in local_points_files(args):
+            slug = points_slug(path)
+            if slug is None:
+                notes.append(f"{path.name} is not a sensor points file")
+                continue
+            if sysfs is None:
+                sysfs = discover_sensors()
+            sensor = resolve_slug(slug, groups, directive, args, sysfs)
+            if sensor is None:
+                notes.append(f"{path.name} does not match a sensor path")
+                continue
+            if args.sensor and not same_sensor(sensor, args.sensor):
+                continue
+            group = group_for(groups, sensor)
+            if path.resolve() not in {item.resolve() for item in group.points}:
+                group.points.append(path)
+
+    def sort_key(group):
+        configured = directive is not None and same_sensor(group.sensor, directive.sensor)
+        return (0 if configured else 1, group.sensor)
+
+    groups.sort(key=sort_key)
+    return groups, notes, log_err
+
+
+def print_banner(count, sensors, rotated):
+    print("chrony temperature compensation")
+    noun = "sensor" if count == 1 else "sensors"
+    print(f"analyzing {count} {noun}")
+    for sensor in sensors:
+        print(f"  {sensor}")
+    if rotated is True:
+        print("rotated logs are included")
+    elif rotated is False:
+        print("rotated logs are skipped")
+
+
+def choose_points_file(paths):
+    def rank(path):
+        prefer = 0 if path.name.endswith("-comp.points") else 1
+        try:
+            age = -path.stat().st_mtime
+        except OSError:
+            age = 0
+        return (prefer, age, path.name)
+
+    return sorted(paths, key=rank)[0]
+
+
+def report_points_only(group, index, count, args, directive, advice):
+    path = choose_points_file(group.points)
+    points, err = load_points(path)
+    print()
+    print(f"sensor {index} of {count}: {group.sensor}")
+    names = ", ".join(item.name for item in group.points)
+    print(f"sources: points file {names}")
+    if err:
+        print(f"could not read {path}: {err}")
+        return 1
+    temps = [temp for temp, _comp in points]
+    span_c = (max(temps) - min(temps)) / 1000.0
+    print(
+        f"temperature: {fmt_temp(min(temps))} .. {fmt_temp(max(temps))} "
+        f"({span_c:.1f} °C, {len(points)} points)"
+    )
+    print("No clock-rate samples for this sensor. The line uses this points file.")
+    interval = interval_for(args, directive, group.sensor)
+    line = f"tempcomp {group.sensor} {fmt_interval(interval)} {path.resolve()}"
+    print()
+    print("Consider adding this line to chrony.conf:")
+    print()
+    print(line)
+    advice.append(line)
+    try:
+        coeff = fit_quadratic(temps, [comp for _temp, comp in points])
+    except ValueError:
+        return 0
+    info = {"t0": coeff[0], "k0": coeff[1], "k1": coeff[2], "k2": coeff[3], "status": "points"}
+    quad = temp_line(group.sensor, interval, info)
+    print()
+    print("Quadratic form of that curve:")
+    print()
+    print(quad)
+    advice.append(quad)
+    return 0
+
+
+def measurement_context(args, directive, group, index, count):
+    readings = []
+    files = []
+    gaps = []
+    tracks = None
+    log_temps = 0
+    source_bits = []
+    if group.use_logs and group.bundle is not None:
+        temps, paired, log_gaps, tracks, log_files = group.bundle
+        readings.extend(paired)
+        gaps.extend(log_gaps)
+        files.extend(log_files)
+        log_temps = len(temps)
+        source_bits.append("chrony logs")
+    seen = {reading.t for reading in readings}
+    csv_n = 0
+    for path in group.csvs:
+        _sensor, rows = load_preliminary(path)
+        added = 0
+        for row in rows:
+            if row.t in seen:
+                continue
+            readings.append(row)
+            seen.add(row.t)
+            added += 1
+        csv_n += added
+        files.append(path.name)
+    if group.csvs:
+        source_bits.append("csv")
+    readings.sort(key=lambda reading: reading.t)
+    if tracks is None:
+        tracks = [
+            Track(
+                reading.t,
+                reading.ref,
+                reading.freq,
+                reading.skew,
+                reading.offset,
+                reading.leap,
+            )
+            for reading in readings
+        ]
+    kept, drops, _windows = select_readings(readings, gaps, tracks, args)
+    context = {
+        "index": index,
+        "count": count,
+        "source": " and ".join(source_bits) if source_bits else "none",
+        "label": "chrony" if group.use_logs else "preliminary",
+        "files": files,
+        "sensor": group.sensor,
+        "temp_n": log_temps + csv_n,
+        "paired": len(readings),
+        "interval": interval_for(args, directive, group.sensor),
+        "max_comp": max((abs(reading.comp) for reading in kept), default=0.0),
+        "points_note": ", ".join(path.name for path in group.points),
+    }
+    return kept, drops, context
+
+
+def print_conf_lines(lines):
+    if not lines:
+        return
+    print()
+    print("chrony.conf")
+    for line in lines:
+        print(line)
+
+
 def run(args):
+    args.samples_explicit = args.samples is not None
+    args.points_explicit = args.points is not None
     directive, note = active_directive(args.chrony_conf)
-    resolve_output_paths(args, directive)
     if note and directive is not None:
         print(f"note: {note}", file=sys.stderr)
-    if args.sensor and directive is not None and not same_sensor(args.sensor, directive.sensor):
-        if args.collect is None and args.source == "chrony":
-            sys.exit(
-                f"tempcomp.log was produced by {directive.sensor}. "
-                f"--sensor {args.sensor} needs --collect, which samples that file itself."
-            )
     if args.collect is not None:
+        resolve_output_paths(args, directive)
         collect(args, directive)
         prepared, err = prepare_preliminary(args, directive)
         if err:
             sys.exit(err)
-        return emit(*prepared, args, directive)
+        kept, drops, context = prepared
+        context["index"] = 1
+        context["count"] = 1
+        print_banner(1, [context["sensor"]], None)
+        return emit(kept, drops, context, args, directive)
 
-    if args.source in ("auto", "chrony"):
-        prepared, err = prepare_chrony(args, directive)
-        use_chrony = prepared is not None and (
-            args.source == "chrony" or prepared[2]["temp_n"] > 0
+    groups, notes, log_err = discover_groups(args, directive)
+    if not groups:
+        print("chrony temperature compensation")
+        print("analyzing 0 sensors")
+        for line in notes:
+            print(line)
+        if log_err and args.source != "chrony":
+            print(f"chrony log: {log_err}")
+        print("No sensor has a tempcomp log, a *-samples.csv file, or a points file.")
+        print("Collect a first set while the temperature changes:")
+        print("  ./chrony-temp.py --sensors")
+        print("  ./chrony-temp.py --collect 7200 --sensor SENSOR")
+        return 1
+    if args.points_explicit and len(groups) > 1:
+        print(
+            "--points is one file, so each sensor keeps its own points file",
+            file=sys.stderr,
         )
-        if use_chrony:
-            if (
-                args.sensor
-                and directive is not None
-                and not same_sensor(args.sensor, directive.sensor)
-            ):
-                sys.exit(
-                    f"tempcomp.log follows {directive.sensor}, not {args.sensor}"
-                )
-            return emit(*prepared, args, directive)
-        if args.source == "chrony":
-            sys.exit(err or "tempcomp.log produced no samples")
-        chrony_err = err
-    else:
-        chrony_err = None
-
-    if args.source in ("auto", "preliminary"):
-        prepared, err = prepare_preliminary(args, directive)
-        if prepared is not None:
-            if chrony_err:
-                print(
-                    f"chrony log not used ({chrony_err}); using the preliminary file",
-                    file=sys.stderr,
-                )
-            return emit(*prepared, args, directive)
-        if args.source == "preliminary":
-            sys.exit(err)
-
-    print("chrony temperature compensation")
-    print("no temperature samples yet")
-    if chrony_err:
-        print(f"chrony log: {chrony_err}")
-    print("The log appears after chrony.conf contains both a tempcomp line and:")
-    print("  log tracking tempcomp")
-    print("Until that log exists, collect a first set while the temperature changes:")
-    print("  ./chrony-temp.py --sensors")
-    print("  ./chrony-temp.py --collect 7200 --sensor SENSOR")
+    print_banner(
+        len(groups),
+        [group.sensor for group in groups],
+        args.include_rotated if args.source != "preliminary" else None,
+    )
+    for line in notes:
+        print(line)
+    advice = []
+    codes = []
+    for index, group in enumerate(groups, start=1):
+        if not group.use_logs and not group.csvs and group.points:
+            code = report_points_only(group, index, len(groups), args, directive, advice)
+            codes.append(code)
+            continue
+        if not group.use_logs and not group.csvs:
+            print()
+            print(f"sensor {index} of {len(groups)}: {group.sensor}")
+            print("no samples for this sensor")
+            codes.append(1)
+            continue
+        kept, drops, context = measurement_context(
+            args, directive, group, index, len(groups)
+        )
+        code = emit(kept, drops, context, args, directive, advice)
+        codes.append(code)
+    print_conf_lines(advice)
+    if args.strict and any(code == 2 for code in codes):
+        return 2
+    if advice:
+        return 0
     return 1
 
 
@@ -1536,10 +1826,12 @@ def parse_args(argv):
             "  ./chrony-temp.py --sensors\n"
             "  ./chrony-temp.py --collect 7200 --sensor /sys/class/thermal/thermal_zone0/temp\n"
             "  ./chrony-temp.py\n"
-            "  ./chrony-temp.py --include-rotated\n"
+            "  ./chrony-temp.py --sensor /sys/class/thermal/thermal_zone0/temp\n"
+            "  ./chrony-temp.py --no-include-rotated\n"
             "\n"
-            "The first insertion can come from --collect. After `log tempcomp`\n"
-            "is enabled, run the script again and it refits from tempcomp.log.\n"
+            "With no flags, every sensor that has data is reported. Data is\n"
+            "tempcomp logs (rotated logs included), *-samples.csv, and points\n"
+            "files in the working directory. --sensor limits the run to one.\n"
         ),
     )
     parser.add_argument(
@@ -1562,13 +1854,13 @@ def parse_args(argv):
     )
     parser.add_argument(
         "--sensor",
-        help="temperature file to collect, or the sensor that produced a log when chrony.conf has no tempcomp line",
+        help="temperature file to collect, or the only sensor to fit",
     )
     parser.add_argument(
         "--source",
         choices=("auto", "chrony", "preliminary"),
         default="auto",
-        help="auto uses tempcomp.log when it has samples, otherwise the preliminary file (default auto)",
+        help="auto uses chrony logs, csv files, and points files for every sensor (default auto)",
     )
     parser.add_argument(
         "--samples",
@@ -1631,8 +1923,9 @@ def parse_args(argv):
     )
     parser.add_argument(
         "--include-rotated",
-        action="store_true",
-        help="also read tempcomp.log.N and tracking.log.N",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="read tempcomp.log.N and tracking.log.N (default on)",
     )
     parser.add_argument(
         "--include-refclock",
