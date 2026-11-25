@@ -150,11 +150,11 @@ The script reads `chronyc tracking`, `tracking.log`, `tempcomp.log`, and the act
 - the measured bound, which is the root distance plus the live skew and residual frequency
 - chrony's own bound, which adds `maxclockerror` (1 ppm unless `chrony.conf` sets it)
 
-It also reports how far the frequency estimate moved in `tracking.log` at each horizon. In holdover those corrections stop, so that movement becomes time error. A second table shows the extra rate if `tempcomp` is turned off and the sensor then moves.
+It also reports how far the frequency estimate moved in `tracking.log` at each horizon, including rotated logs. In holdover those corrections stop, so that movement becomes time error. A second table assumes `tempcomp` stays on. For sensor moves of 2, 5, and 10°F in both directions, it shows how far the compensation change walks the clock over 1 day and 7 days. That walk is the crystal drift the model removes, so it is not added to the measured bound.
 
 ```bash
 ./holdover-estimate.py
-./holdover-estimate.py --include-rotated
+./holdover-estimate.py --no-include-rotated
 ```
 
 ## Python setup

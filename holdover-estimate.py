@@ -16,6 +16,10 @@ measurement. The skew is the measured uncertainty of the current fit.
 tracking.log adds a second figure. While NTP was selected, the frequency
 column is the correction chrony was still making. In holdover those
 corrections stop, so a frequency change of that size becomes time error.
+
+The temperature table assumes the tempcomp line stays on. A sensor move
+changes the compensation. The 1 day and 7 day columns are that walk of
+the clock, which is the crystal drift the model is removing.
 """
 
 import argparse
@@ -31,6 +35,9 @@ from pathlib import Path
 DATE_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 DEFAULT_MAXCLOCKERROR = 1.0
 HORIZON_UNIT = {"s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}
+F_TO_C = 5.0 / 9.0
+DAY = 86400.0
+WEEK = 7.0 * DAY
 
 
 @dataclass
@@ -691,11 +698,17 @@ def report(live, source, tracks, groups, directive, temp_rows, clockerror, clock
     print_table(headers, data)
     if short:
         print()
-        print(
-            "Horizons marked 'log too short' need "
-            f"{args.min_pairs} pairs about that far apart in tracking.log. "
-            "Pass --include-rotated when older logs are still on disk."
-        )
+        if args.include_rotated:
+            print(
+                "Horizons marked 'log too short' need "
+                f"{args.min_pairs} pairs about that far apart, "
+                "including rotated tracking logs."
+            )
+        else:
+            print(
+                "Horizons marked 'log too short' need "
+                f"{args.min_pairs} pairs about that far apart in tracking.log."
+            )
 
     print()
     print("temperature")
@@ -721,9 +734,11 @@ def report(live, source, tracks, groups, directive, temp_rows, clockerror, clock
             )
             per_c = slope_ppm_per_c(directive, raw)
             if per_c is not None:
+                per_f = per_c * F_TO_C
                 print(
                     f"slope at this temperature: {per_c:+.3f} ppm per °C "
-                    f"({fmt_abs(ppm_to_seconds(abs(per_c), 3600))} per hour per degree)"
+                    f"({per_f:+.3f} ppm per °F, "
+                    f"{fmt_abs(ppm_to_seconds(abs(per_f), 3600))} per hour per °F)"
                 )
     if temp_rows:
         temps = [item[1] for item in temp_rows]
@@ -747,40 +762,34 @@ def report(live, source, tracks, groups, directive, temp_rows, clockerror, clock
         "The measured skew was taken with tempcomp already applied, so the "
         "table above is the holdover with that line left on."
     )
-    if comp_now is None:
-        return
-    extra = abs(comp_now)
-    print(
-        f"Turning tempcomp off as well leaves the current {comp_now:+.3f} ppm "
-        f"uncorrected. That adds {fmt_abs(ppm_to_seconds(extra, 3600))} per hour "
-        f"and {fmt_abs(ppm_to_seconds(extra, 86400))} per day on top of the measured bound, "
-        "for as long as the sensor stays at this temperature."
-    )
-    if directive.k1 is None or not args.swings:
+    if comp_now is None or not args.swings:
         return
     print()
     print(
-        "If the sensor then moves, and tempcomp is off, the extra rate is the "
-        "compensation the model would have applied at the new temperature."
+        "Tempcomp stays on. If the sensor moves and then stays there, the "
+        "compensation changes by the amount below. The 1 day and 7 day columns "
+        "are how far that change walks the clock. The model is cancelling the "
+        "crystal's temperature drift, so this walk is not added to the measured bound."
     )
-    headers = ["sensor move", "comp there", "extra at 1h", "extra at 1d"]
+    headers = ["change", "comp change", "1 day", "7 days"]
     data = []
-    # Each requested magnitude is shown in both directions. Cooling toward
-    # T0 and warming away from it do not add the same rate.
+    # Each requested magnitude is shown in both directions. The model is
+    # not symmetric around the current temperature.
     swings = sorted({-abs(swing) for swing in args.swings} | {abs(swing) for swing in args.swings})
-    for swing in swings:
-        # Swing is in °C. Millidegree sensors store 1000 units per degree.
-        step = swing * 1000.0 if abs(raw) >= 200 else swing
+    for swing_f in swings:
+        delta_c = swing_f * F_TO_C
+        # Swing is in °C once converted. Millidegree sensors store 1000 units per degree.
+        step = delta_c * 1000.0 if abs(raw) >= 200 else delta_c
         try:
-            comp = poly_at(raw + step, directive)
+            delta_ppm = poly_at(raw + step, directive) - comp_now
         except (TypeError, ValueError):
             continue
         data.append(
             [
-                f"{swing:+.1f} °C",
-                f"{comp:+.3f} ppm",
-                fmt_abs(ppm_to_seconds(abs(comp), 3600)),
-                fmt_abs(ppm_to_seconds(abs(comp), 86400)),
+                f"{swing_f:+g} °F",
+                f"{delta_ppm:+.3f} ppm",
+                fmt_signed(ppm_to_seconds(delta_ppm, DAY)),
+                fmt_signed(ppm_to_seconds(delta_ppm, WEEK)),
             ]
         )
     if data:
@@ -825,12 +834,15 @@ def parse_args(argv):
         epilog=(
             "examples:\n"
             "  ./holdover-estimate.py\n"
-            "  ./holdover-estimate.py --include-rotated\n"
-            "  ./holdover-estimate.py --horizons 1h,6h,1d --temp-swing 1,5\n"
+            "  ./holdover-estimate.py --no-include-rotated\n"
+            "  ./holdover-estimate.py --temp-swing 2,5,10\n"
             "\n"
             "The measured bound uses the live skew and residual frequency.\n"
             "The chrony bound also adds maxclockerror (1 ppm unless chrony.conf\n"
-            "sets it). The observed column comes from tracking.log.\n"
+            "sets it). The observed column comes from tracking.log, including\n"
+            "rotated logs unless --no-include-rotated is set. The temperature\n"
+            "table keeps tempcomp on and shows 1 day and 7 day compensation\n"
+            "walks for sensor moves in °F.\n"
         ),
     )
     parser.add_argument(
@@ -847,8 +859,9 @@ def parse_args(argv):
     )
     parser.add_argument(
         "--include-rotated",
-        action="store_true",
-        help="also read tracking.log.N and tempcomp.log.N",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="read tracking.log.N and tempcomp.log.N (default on)",
     )
     parser.add_argument(
         "--startup",
@@ -869,8 +882,8 @@ def parse_args(argv):
     )
     parser.add_argument(
         "--temp-swing",
-        default="1,5",
-        help="temperature moves in °C to show with tempcomp off; both directions are printed (default 1,5)",
+        default="2,5,10",
+        help="temperature moves in °F with tempcomp left on; both directions are printed (default 2,5,10)",
     )
     parser.add_argument(
         "--min-pairs",
