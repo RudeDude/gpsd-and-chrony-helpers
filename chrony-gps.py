@@ -21,7 +21,9 @@ rounded up to the next millisecond. poll, filter, precision, and
 maxdispersion are left as they are: the SHM dispersion column is the
 driver's timestamp noise, and the USB jitter shows up in the residual.
 
-The script prints a refclock line. It does not write chrony.conf.
+The script prints a refclock line. The last lines of the report are those
+lines alone, so they can be pasted into chrony.conf. It does not write
+the file.
 """
 
 import argparse
@@ -587,19 +589,8 @@ def print_report(context, results, args, conf_lines):
 
     for result in results:
         _print_refid(result, context, conf_lines)
-    for result in results:
-        offset = "" if result["offset"] is None else fmt_offset(result["offset"])
-        delay = "" if result["delay"] is None else fmt_delay(result["delay"])
-        drops = result["drops_raw"]
-        print(
-            f"result refid={result['refid']} status={result['status']} "
-            f"offset={offset} delay={delay} "
-            f"raw={result['raw_n']} filtered={result['filt_n']} "
-            f"span={result['span']:.0f}s "
-            f"warmup={drops['warmup']} unsynced={drops['unsynced']} "
-            f"settle={drops['settle']} tracking={drops['tracking-offset']} "
-            f"before={drops['before-tracking']}"
-        )
+    for line in conf_text(results, conf_lines):
+        print(line)
 
 
 def _print_refid(result, context, conf_lines):
@@ -670,6 +661,19 @@ def _print_refid(result, context, conf_lines):
         refid, conf_lines, result["offset"], result["delay"], result["status"] == "ok"
     )
     print()
+
+
+def conf_text(results, conf_lines):
+    """Refclock lines with the recommended offset and delay filled in."""
+    lines = []
+    for result in results:
+        offset = result["offset"]
+        delay = result["delay"]
+        if offset is None or delay is None:
+            continue
+        for line in conf_lines.get(result["refid"], []):
+            lines.append(suggest_line(line, offset, delay).strip())
+    return lines
 
 
 def result_cover(result):

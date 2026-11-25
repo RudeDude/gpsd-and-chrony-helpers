@@ -4,8 +4,9 @@
 Two stages:
 
 - Before tempcomp is logged, --collect reads one sensor and chronyc
-  tracking and stores a preliminary file in the working directory. That
-  file is enough to insert a first tempcomp line.
+  tracking and stores <sensor>-samples.csv in the working directory.
+  The sensor name is the last two parts of its path, so two collections
+  can run at once. That file is enough to insert a first tempcomp line.
 - After chrony.conf logs tempcomp, the fit uses tempcomp.log and
   tracking.log. Each later run replaces the suggestion with one computed
   from those logs.
@@ -499,8 +500,24 @@ def sensor_slug(path):
     return slug or "sensor"
 
 
+def default_samples_path(sensor):
+    return Path.cwd() / f"{sensor_slug(sensor)}-samples.csv"
+
+
 def default_points_path(sensor):
-    return Path.cwd() / f"chrony-tempcomp-{sensor_slug(sensor)}.points"
+    return Path.cwd() / f"{sensor_slug(sensor)}-comp.points"
+
+
+def resolve_output_paths(args, directive):
+    """Pick the preliminary CSV from the sensor when --samples was omitted."""
+    sensor = args.sensor
+    if not sensor and directive is not None:
+        sensor = directive.sensor
+    if args.samples is None:
+        if sensor:
+            args.samples = default_samples_path(sensor)
+        else:
+            args.samples = Path.cwd() / "sensor-samples.csv"
 
 
 def read_sysfs_temp(path):
@@ -1097,6 +1114,21 @@ def curve_diff(info, directive):
     }
 
 
+def capture_span(readings):
+    """Temperature and uncompensated clock-rate range of stored samples."""
+    if not readings:
+        return None
+    temps = [reading.temp for reading in readings]
+    rates = [reading.freq - reading.comp for reading in readings]
+    return {
+        "n": len(readings),
+        "tmin": min(temps),
+        "tmax": max(temps),
+        "rmin": min(rates),
+        "rmax": max(rates),
+    }
+
+
 def temp_line(sensor, interval, info):
     return (
         f"tempcomp {sensor} {fmt_interval(interval)} "
@@ -1153,6 +1185,7 @@ def print_report(context, info, drops, args, directive, points_path, points_meta
             f"{MIN_FIT} samples and {MIN_TEMP_PREVIEW:.1f} °C of temperature span."
         )
         _print_next(context, directive)
+        _print_capture(context, info, args, directive, points_path)
         return
     print(
         f"clock rate: mean {info['mean_freq']:+.3f} ppm "
@@ -1186,6 +1219,7 @@ def print_report(context, info, drops, args, directive, points_path, points_meta
         print(f"note: {line}")
     if status == "short":
         _print_next(context, directive)
+        _print_capture(context, info, args, directive, points_path)
         return
     tag = "suggested" if status == "ok" else "preview"
     print()
@@ -1210,6 +1244,58 @@ def print_report(context, info, drops, args, directive, points_path, points_meta
             f"{fmt_interval(context['interval'])} {points_path}"
         )
     _print_next(context, directive)
+    _print_capture(context, info, args, directive, points_path)
+
+
+def _print_capture(context, info, args, directive, points_path):
+    """Closing summary for a finished --collect run."""
+    if args.collect is None:
+        return
+    captured = context.get("captured")
+    print()
+    print("captured")
+    if not captured:
+        print(f"no samples were stored in {args.samples.name}")
+        return
+    span_c = (captured["tmax"] - captured["tmin"]) / 1000.0
+    sweep = captured["rmax"] - captured["rmin"]
+    print(
+        f"{captured['n']} samples in {args.samples.name}: "
+        f"temperature {fmt_temp(captured['tmin'])} .. {fmt_temp(captured['tmax'])} "
+        f"({span_c:.1f} °C)"
+    )
+    print(
+        f"clock rate {captured['rmin']:+.3f} .. {captured['rmax']:+.3f} ppm "
+        f"(sweep {sweep:.3f} ppm, positive means the clock runs fast)"
+    )
+    print()
+    if "k0" not in info:
+        print(
+            "No chrony.conf line yet. The fit needs at least "
+            f"{MIN_FIT} samples and {MIN_TEMP_PREVIEW:.1f} °C of temperature span."
+        )
+        return
+    status = info.get("status", "short")
+    if status != "ok":
+        print(
+            f"Status is {status}, so treat this as a first estimate "
+            "rather than a finished line."
+        )
+    same = directive is not None and same_sensor(context["sensor"], directive.sensor)
+    if same:
+        print("Consider replacing the active tempcomp line in chrony.conf with:")
+    else:
+        print("Consider adding this line to chrony.conf:")
+    print()
+    print(temp_line(context["sensor"], context["interval"], info))
+    if points_path is not None:
+        print()
+        print("Or this line, which uses the points file:")
+        print()
+        print(
+            f"tempcomp {context['sensor']} "
+            f"{fmt_interval(context['interval'])} {points_path}"
+        )
 
 
 def _notes(info, status, args, context):
@@ -1327,6 +1413,7 @@ def prepare_preliminary(args, directive):
     ]
     kept, drops, _windows = select_readings(readings, [], dummy_tracks, args)
     context = {
+        "captured": capture_span(readings),
         "source": f"preliminary {args.samples}",
         "label": "preliminary",
         "files": [args.samples.name],
@@ -1379,6 +1466,7 @@ def emit(kept, drops, context, args, directive):
 
 def run(args):
     directive, note = active_directive(args.chrony_conf)
+    resolve_output_paths(args, directive)
     if note and directive is not None:
         print(f"note: {note}", file=sys.stderr)
     if args.sensor and directive is not None and not same_sensor(args.sensor, directive.sensor):
@@ -1485,14 +1573,20 @@ def parse_args(argv):
     parser.add_argument(
         "--samples",
         type=Path,
-        default=Path.cwd() / "chrony-temp-samples.csv",
-        help="preliminary sample file (default ./chrony-temp-samples.csv)",
+        default=None,
+        help=(
+            "preliminary sample file "
+            "(default ./<sensor>-samples.csv, such as thermal_zone0-temp-samples.csv)"
+        ),
     )
     parser.add_argument(
         "--points",
         type=Path,
         default=None,
-        help="points file to write (default ./chrony-tempcomp-<sensor>.points)",
+        help=(
+            "points file to write "
+            "(default ./<sensor>-comp.points, such as thermal_zone0-temp-comp.points)"
+        ),
     )
     parser.add_argument(
         "--no-write",

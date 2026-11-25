@@ -9,6 +9,7 @@ __pycache__/
 *-cache.json
 
 # chrony-temp.py writes these in the working directory.
-chrony-temp-samples.csv
+# The sensor name is the last two parts of the sensor path.
 *-samples.csv
+*-comp.points
 chrony-tempcomp-*.points

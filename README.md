@@ -66,7 +66,7 @@ The cache contains latitude, longitude, and height. `.gitignore` ignores `*-cach
 
 ### `chrony-gps.py`
 
-Read chrony's `refclocks.log` and `tracking.log` and recommend a refclock `offset` and `delay` for each `GPS*` refid. When it can read `chrony.conf`, it also prints a `refclock` line with those two values filled in. The script never writes the config.
+Read chrony's `refclocks.log` and `tracking.log` and recommend a refclock `offset` and `delay` for each `GPS*` refid. When it can read `chrony.conf`, the last lines of the report are the active `refclock` lines with those two values filled in, and nothing else on the line, so they can be pasted into the config. The script never writes the file.
 
 A refclock sample counts while all of these are true:
 
@@ -123,7 +123,7 @@ The points file is the same curve sampled every 0.25 °C, with a bin median used
 
 `--sensors` reads `/sys/class/thermal` and `/sys/class/hwmon` and marks board and CPU-package sensors as the ones to try first. Wifi, disk, and battery sensors are listed as distant from the oscillator.
 
-`--collect` is the first insertion, before `tempcomp.log` exists. It samples the chosen sensor and `chronyc tracking` for the given number of seconds and appends `chrony-temp-samples.csv`. If a `tempcomp` line is already active, each sample subtracts the compensation chrony is applying so the fit is not stacked on top of it. The temperature has to move during the collection. A machine sitting at one temperature cannot show the curve.
+`--collect` is the first insertion, before `tempcomp.log` exists. It samples the chosen sensor and `chronyc tracking` for the given number of seconds and appends `<sensor>-samples.csv` in the working directory. The sensor name is the last two parts of the path, so `/sys/class/thermal/thermal_zone0/temp` writes `thermal_zone0-temp-samples.csv`. Two collections can run at the same time. If a `tempcomp` line is already active, each sample subtracts the compensation chrony is applying so the fit is not stacked on top of it. The temperature has to move during the collection. A machine sitting at one temperature cannot show the curve. When the run finishes, the last lines are the temperature and clock-rate sweep stored in that file, then the `tempcomp` line to consider adding to `chrony.conf`.
 
 After that line is installed, add `tempcomp` to the log directive and run `./chrony-temp.py` with no `--collect`. The refit then uses `tempcomp.log` paired with `tracking.log`. A temperature reading counts while an NTP server is selected, the tracking offset and frequency skew are inside the limits, and the reading is past the warmup after an unsynchronised sample. Each later run rewrites the points file from those logs.
 
@@ -133,8 +133,8 @@ After that line is installed, add `tempcomp` to the log directive and run `./chr
 | `--collect` | Sample the sensor and `chronyc tracking` for this many seconds, then fit | off |
 | `--sensor` | Temperature file for `--collect` | required with `--collect` |
 | `--source` | `auto`, `chrony`, or `preliminary` | `auto` |
-| `--samples` | Preliminary CSV path | `./chrony-temp-samples.csv` |
-| `--points` | Points-file path | `./chrony-tempcomp-<sensor>.points` |
+| `--samples` | Preliminary CSV path | `./<sensor>-samples.csv` |
+| `--points` | Points-file path | `./<sensor>-comp.points` |
 | `--log-dir` | Directory with `tempcomp.log` and `tracking.log` | `/var/log/chrony` |
 | `--chrony-conf` | Read-only source for the active `tempcomp` line | `/etc/chrony/chrony.conf` |
 | `--interval` | Update interval in the suggested line, seconds | the configured interval, else 60 |
@@ -148,7 +148,7 @@ After that line is installed, add `tempcomp` to the log directive and run `./chr
 
 Status stays `preliminary` until the sample, time, and temperature-span bars are all met. A curve that barely moves is `flat`.
 
-`chrony-temp-samples.csv` and `chrony-tempcomp-*.points` are listed in `.gitignore`.
+`*-samples.csv` and `*-comp.points` are listed in `.gitignore`.
 
 ### `holdover-estimate.py`
 
