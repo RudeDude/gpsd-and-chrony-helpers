@@ -1,2 +1,10 @@
 my-session.txt
 
+# Bytecode from running the scripts.
+__pycache__/
+*.py[cod]
+
+# aid-cache.py writes these next to the script. They store latitude,
+# longitude, and height. A cache passed with -f needs its own line here.
+aiding-cache.json
+aiding-cache-*.json
