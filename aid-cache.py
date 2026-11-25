@@ -6,8 +6,8 @@ Autonomous records. u-blox 8 and 9 store the navigation database as
 UBX-MGA-DBD, which the receiver itself ages out. Position and time are
 not taken from this file: load runs aid-ini.py so the clock is current.
 
-One invocation talks to one gpsd device. The default cache file for
-ttyACM0 is aiding-cache.json. Any other device gets its own file.
+One invocation talks to one gpsd device. The default cache file is
+<device>-cache.json beside this script. ttyACM0 uses ttyACM0-cache.json.
 
 gpsd must already be talking to the receiver.
 """
@@ -41,11 +41,9 @@ KIND = {
 
 
 def default_path(device):
-    """ttyACM0 keeps the original cache name. Other devices get their own file."""
+    """Cache file beside this script: <device name>-cache.json."""
     directory = Path(__file__).resolve().parent
-    if device == "/dev/ttyACM0":
-        return directory / "aiding-cache.json"
-    return directory / f"aiding-cache-{Path(device).name}.json"
+    return directory / f"{Path(device).name}-cache.json"
 
 
 def parse_aid_dump(text):
@@ -349,7 +347,7 @@ def main():
         "--file",
         type=Path,
         default=None,
-        help="cache file (default aiding-cache.json on ttyACM0, else aiding-cache-<device>.json)",
+        help="cache file (default <device>-cache.json beside this script)",
     )
     args = ap.parse_args()
     device = gpsdev.canonical_device(args.device)

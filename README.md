@@ -50,9 +50,9 @@ Older ephemeris and AssistNow Autonomous records stay in the file and are skippe
 ./aid-cache.py load -f /path/to/cache.json
 ```
 
-The default cache for `/dev/ttyACM0` is `aiding-cache.json` in this directory. Any other device uses `aiding-cache-<device>.json`.
+The default cache is `<device>-cache.json` in this directory. `/dev/ttyACM0` writes `ttyACM0-cache.json`. `/dev/ttyACM1` writes `ttyACM1-cache.json`. The name is the device's basename, so a short name such as `ttyACM1` uses the same file as `/dev/ttyACM1`.
 
-The cache contains latitude, longitude, and height. The default names are listed in `.gitignore`. A path passed with `-f` is ignored only if you add that name yourself. Keep cache files out of git.
+The cache contains latitude, longitude, and height. `.gitignore` ignores `*-cache.json`. A path passed with `-f` is ignored when its name matches that pattern. Keep cache files out of git.
 
 ### `chrony-gps.py`
 

@@ -6,5 +6,4 @@ __pycache__/
 
 # aid-cache.py writes these next to the script. They store latitude,
 # longitude, and height. A cache passed with -f needs its own line here.
-aiding-cache.json
-aiding-cache-*.json
+*-cache.json
