@@ -140,6 +140,23 @@ Status stays `preliminary` until the sample, time, and temperature-span bars are
 
 `chrony-temp-samples.csv` and `chrony-tempcomp-*.points` are listed in `.gitignore`.
 
+### `holdover-estimate.py`
+
+Estimate how far the system clock would drift after every NTP server and refclock stops. chronyd would keep the last frequency. A `tempcomp` line would keep running, because it does not need those sources.
+
+The script reads `chronyc tracking`, `tracking.log`, `tempcomp.log`, and the active `tempcomp` and `maxclockerror` lines. It prints three growth figures:
+
+- the point error, which is the current offset plus the residual frequency
+- the measured bound, which is the root distance plus the live skew and residual frequency
+- chrony's own bound, which adds `maxclockerror` (1 ppm unless `chrony.conf` sets it)
+
+It also reports how far the frequency estimate moved in `tracking.log` at each horizon. In holdover those corrections stop, so that movement becomes time error. A second table shows the extra rate if `tempcomp` is turned off and the sensor then moves.
+
+```bash
+./holdover-estimate.py
+./holdover-estimate.py --include-rotated
+```
+
 ## Python setup
 
 Python 3.10 or newer. The `float | None` annotation in `chrony-gps.py` needs that version.
