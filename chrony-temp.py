@@ -605,6 +605,33 @@ def same_sensor(left, right):
         return False
 
 
+def canonical_sensor(path, args, directive):
+    """Prefer the path from --sensor or chrony.conf when names alias one file.
+
+    /sys/class/thermal/thermal_zone0 is a symlink into /sys/devices/virtual/thermal.
+    Both paths read the same temp file. The config line should keep the path
+    the user already chose, not whichever alias was written down first.
+    """
+    if path is None:
+        return None
+    if getattr(args, "sensor", None) and same_sensor(args.sensor, path):
+        return str(args.sensor)
+    if directive is not None and same_sensor(directive.sensor, path):
+        return str(directive.sensor)
+    return str(path)
+
+
+def remember_sensor(path, sensor):
+    """Store the chosen sensor path in the csv header when it names the same file."""
+    existing = samples_header_sensor(path)
+    if not existing or existing == sensor or not same_sensor(existing, sensor):
+        return existing
+    text = path.read_text(encoding="utf-8")
+    _first, sep, rest = text.partition("\n")
+    path.write_text(f"# sensor {sensor}\n" + (rest if sep else ""), encoding="utf-8")
+    return existing
+
+
 def print_sensors(args):
     directive, note = active_directive(args.chrony_conf)
     sensors = discover_sensors()
@@ -837,6 +864,12 @@ def collect(args, directive):
             f"{args.samples} already holds samples from {existing}. "
             f"Move that file aside before collecting {sensor}."
         )
+    if existing and existing != sensor:
+        print(
+            f"{existing} is the same file as {sensor}; keeping {sensor}",
+            file=sys.stderr,
+        )
+        remember_sensor(args.samples, sensor)
     comp_sensor = None
     if directive is not None:
         comp_sensor = directive.sensor
@@ -1153,6 +1186,8 @@ def print_report(context, info, drops, args, directive, points_path, points_meta
             f"points file on disk: {context['points_note']} "
             "(clock-rate samples are used instead)"
         )
+    if context.get("alias_note"):
+        print(f"{context['alias_note']} is another name for this same file")
     if info.get("t_start") is not None:
         print(f"span: {fmt_time(info['t_start'])} .. {fmt_time(info['t_end'])}")
     print(
@@ -1380,14 +1415,16 @@ def _print_next(context, directive):
 def prepare_preliminary(args, directive):
     if not args.samples.exists():
         return None, f"no preliminary file at {args.samples}"
-    sensor, readings = load_preliminary(args.samples)
-    if args.sensor and sensor and not same_sensor(args.sensor, sensor):
+    recorded, readings = load_preliminary(args.samples)
+    if args.sensor and recorded and not same_sensor(args.sensor, recorded):
         return None, (
-            f"{args.samples} belongs to {sensor}, not {args.sensor}"
+            f"{args.samples} belongs to {recorded}, not {args.sensor}"
         )
-    sensor = sensor or args.sensor
+    sensor = canonical_sensor(recorded or args.sensor, args, directive)
     if sensor is None:
         return None, f"{args.samples} does not name a sensor"
+    if recorded and recorded != sensor:
+        remember_sensor(args.samples, sensor)
     # Preliminary rows are already paired. Gaps stay empty.
     dummy_tracks = [
         Track(reading.t, reading.ref, reading.freq, reading.skew, reading.offset, reading.leap)
@@ -1400,6 +1437,7 @@ def prepare_preliminary(args, directive):
         "label": "preliminary",
         "files": [args.samples.name],
         "sensor": sensor,
+        "alias_note": recorded if recorded and recorded != sensor else "",
         "removed": None,
         "temp_n": len(readings),
         "paired": len(readings),
@@ -1470,6 +1508,7 @@ class SensorData:
     points: list
     use_logs: bool = False
     bundle: tuple | None = None
+    alias_note: str = ""
 
 
 def interval_for(args, directive, sensor):
@@ -1540,11 +1579,13 @@ def resolve_slug(slug, groups, directive, args, sysfs):
     return None
 
 
-def group_for(groups, sensor):
+def group_for(groups, sensor, args, directive):
+    chosen = canonical_sensor(sensor, args, directive)
     for group in groups:
-        if same_sensor(group.sensor, sensor):
+        if same_sensor(group.sensor, chosen):
+            group.sensor = canonical_sensor(group.sensor, args, directive)
             return group
-    group = SensorData(str(sensor), [], [], False, None)
+    group = SensorData(chosen, [], [], False, None)
     groups.append(group)
     return group
 
@@ -1564,7 +1605,12 @@ def discover_groups(args, directive):
             if args.samples_explicit:
                 sys.exit(f"{path} belongs to {header}, not {args.sensor}")
             continue
-        group_for(groups, header).csvs.append(path)
+        chosen = canonical_sensor(header, args, directive)
+        group = group_for(groups, header, args, directive)
+        if header != chosen and not group.alias_note:
+            group.alias_note = header
+            remember_sensor(path, chosen)
+        group.csvs.append(path)
 
     logs, log_err = (None, None)
     if args.source != "preliminary":
@@ -1583,7 +1629,7 @@ def discover_groups(args, directive):
                 "Pass --sensor to use them."
             )
         elif args.sensor is None or same_sensor(args.sensor, log_sensor):
-            group = group_for(groups, log_sensor)
+            group = group_for(groups, log_sensor, args, directive)
             group.use_logs = True
             group.bundle = logs
         else:
@@ -1606,7 +1652,7 @@ def discover_groups(args, directive):
                 continue
             if args.sensor and not same_sensor(sensor, args.sensor):
                 continue
-            group = group_for(groups, sensor)
+            group = group_for(groups, sensor, args, directive)
             if path.resolve() not in {item.resolve() for item in group.points}:
                 group.points.append(path)
 
@@ -1735,6 +1781,7 @@ def measurement_context(args, directive, group, index, count):
         "interval": interval_for(args, directive, group.sensor),
         "max_comp": max((abs(reading.comp) for reading in kept), default=0.0),
         "points_note": ", ".join(path.name for path in group.points),
+        "alias_note": group.alias_note,
     }
     return kept, drops, context
 
